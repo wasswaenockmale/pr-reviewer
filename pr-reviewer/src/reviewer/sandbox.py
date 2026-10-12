@@ -2,14 +2,17 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-_STATUS = {0: "passed", 1: "failed", 5: "no_tests"}  # anything else -> "error"
-_KEEP_ENV = {"PATH", "LANG", "LC_ALL", "VIRTUAL_ENV"}
+# Non-secret variables the interpreter needs. Windows Python fails at startup without SYSTEMROOT.
+_WINDOWS = {"SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP"}
+_KEEP_ENV = {"PATH", "LANG", "LC_ALL", "VIRTUAL_ENV"} | _WINDOWS
+_FAILED_SUMMARY = re.compile(r"\b\d+ failed\b")
 
 
 @dataclass
@@ -22,8 +25,20 @@ class PytestRun:
 
     @property
     def failed(self) -> bool:
-        """True only for genuine test failures (exit 1), not collection/usage errors."""
+        """True only for genuine test failures, not collection/usage errors or crashes."""
         return self.status == "failed"
+
+
+def classify(exit_code: int, output: str) -> str:
+    """Exit code 1 alone is ambiguous: a crashed interpreter also exits 1.
+    Only call it a test failure if pytest's own summary says tests failed."""
+    if exit_code == 0:
+        return "passed"
+    if exit_code == 5:
+        return "no_tests"
+    if exit_code == 1 and _FAILED_SUMMARY.search(output):
+        return "failed"
+    return "error"
 
 
 def run_pytest(
@@ -35,8 +50,8 @@ def run_pytest(
     max_output: int = 6000,
 ) -> PytestRun:
     with tempfile.TemporaryDirectory() as home:
-        env = {k: v for k, v in os.environ.items() if k in _KEEP_ENV}  # no tokens/API keys
-        env.update(HOME=home, PYTHONDONTWRITEBYTECODE="1")
+        env = {k: v for k, v in os.environ.items() if k.upper() in _KEEP_ENV}  # no tokens/API keys
+        env.update(HOME=home, USERPROFILE=home, PYTHONDONTWRITEBYTECODE="1")
         cmd = [python or sys.executable, "-m", "pytest", "-q", "--no-header",
                "-p", "no:cacheprovider", "-x", *args]
         try:
@@ -45,4 +60,4 @@ def run_pytest(
         except subprocess.TimeoutExpired:
             return PytestRun(run_id, "timeout", None, f"Timed out after {timeout}s")
     out = (p.stdout + p.stderr)[-max_output:]
-    return PytestRun(run_id, _STATUS.get(p.returncode, "error"), p.returncode, out)
+    return PytestRun(run_id, classify(p.returncode, out), p.returncode, out)
