@@ -1,0 +1,2 @@
+[console_scripts]
+pr-reviewer = reviewer.cli:main
